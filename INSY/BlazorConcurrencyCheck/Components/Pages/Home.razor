@@ -1,0 +1,129 @@
+@page "/"
+@using BlazorConcurrencyCheck.Data
+@using BlazorConcurrencyCheck.Services
+@using Microsoft.EntityFrameworkCore
+@implements IDisposable
+@inject IDbContextFactory<AppDbContext> DbFactory
+@inject TicketUpdateService UpdateService
+@rendermode InteractiveServer
+
+<PageTitle>Concurrency Check</PageTitle>
+
+<h1>Ticket Inventory</h1>
+
+@if (statusMessage != null)
+{
+    var alertClass = statusMessage.Contains("conflict") || statusMessage.Contains("error") ? "alert-danger" : "alert-success";
+    <div class="alert @alertClass">@statusMessage</div>
+}
+
+@if (ticket == null)
+{
+    <p>Loading...</p>
+}
+else
+{
+    <div>
+        <label>Ticket ID:</label>
+        <span>@ticket.Id</span>
+    </div>
+    <div>
+        <label>Available Tickets:</label>
+        <input type="number" @bind="ticket.Available" />
+    </div>
+    <button class="btn btn-secondary" @onclick="SaveTicket">Save (Test Concurrency)</button>
+    <button class="btn btn-primary" @onclick="CommitTicket">Commit (Trigger Auto-Update)</button>
+}
+
+@code {
+    private Ticket? ticket;
+    private string? statusMessage;
+    private AppDbContext? dbContext;
+
+    protected override async Task OnInitializedAsync()
+    {
+        UpdateService.OnTicketUpdated += HandleTicketUpdated;
+        await LoadTicketAsync();
+    }
+
+    private async Task LoadTicketAsync()
+    {
+        if (dbContext != null)
+        {
+            await dbContext.DisposeAsync();
+        }
+
+        dbContext = await DbFactory.CreateDbContextAsync();
+        
+        ticket = await dbContext.Tickets.FindAsync(1);
+
+        if (ticket == null)
+        {
+            ticket = new Ticket { Id = 1, Available = 100 };
+            dbContext.Tickets.Add(ticket);
+            await dbContext.SaveChangesAsync();
+        }
+
+        statusMessage = null;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async void HandleTicketUpdated(int ticketId)
+    {
+        if (ticket != null && ticket.Id == ticketId)
+        {
+            await LoadTicketAsync();
+        }
+    }
+
+    private async Task SaveTicket()
+    {
+        if (ticket != null && dbContext != null)
+        {
+            try
+            {
+                await dbContext.SaveChangesAsync();
+                statusMessage = "Saved to database (Other pages NOT notified).";
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                statusMessage = "Concurrency conflict detected! Another user modified this ticket. Reloading latest data...";
+                await Task.Delay(2000);
+                await LoadTicketAsync();
+            }
+            catch (Exception ex)
+            {
+                statusMessage = ex.Message;
+            }
+        }
+    }
+
+    private async Task CommitTicket()
+    {
+        if (ticket != null && dbContext != null)
+        {
+            try
+            {
+                await dbContext.SaveChangesAsync();
+                UpdateService.NotifyTicketUpdated(ticket.Id);
+                statusMessage = "Saved and notified other pages.";
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                statusMessage = "Concurrency conflict detected! Another user modified this ticket. Reloading latest data...";
+                await Task.Delay(2000);
+                await LoadTicketAsync();
+            }
+            catch (Exception ex)
+            {
+                statusMessage = ex.Message;
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        UpdateService.OnTicketUpdated -= HandleTicketUpdated;
+        dbContext?.Dispose();
+    }
+}
